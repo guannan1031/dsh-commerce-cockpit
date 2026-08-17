@@ -6,7 +6,17 @@
 回答老板每天早上问的四个问题 / Answers the four questions a founder asks every morning:
 **今天哪里赚钱/亏钱 → 为什么变 → 下一步做什么 → 谁负责、何时完成**
 
-![screenshot placeholder](https://placehold.co/800x420/0F1E3D/EEF4FF?text=Cockpit+Overview+%E2%80%94+KPI+%2F+Trend+%2F+Channels)
+### 界面截图 / Screenshots
+
+![1 · 经营总览](screenshots/1-overview.png)
+
+![2 · 数据与要点](screenshots/2-detail.png)
+
+![3 · 行动清单](screenshots/3-actions.png)
+
+![4 · 任务 Dock](screenshots/4-dock.png)
+
+![5 · 老板简报](screenshots/5-brief.png)
 
 ## 功能亮点 / Highlights
 
