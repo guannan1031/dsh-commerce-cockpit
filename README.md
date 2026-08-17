@@ -1,6 +1,9 @@
 # 电商经营驾驶舱 · Ecommerce Business Cockpit
 
-> 面向电商老板的 DeepSeek Harness 常驻插件 —— 从"数据报表"到"决策驾驶舱"。
+> 面向电商老板的 DeepSeek Harness 常驻插件 — 从"数据报表"到"决策驾驶舱"。
+>
+> 📲 **定制与合作 / Customization: 微信 WeChat `lijieai2025`（备注：电商驾驶舱定制）· guannan1031@gmail.com · guannan1031@163.com**
+ —— 从"数据报表"到"决策驾驶舱"。
 > A persistent DeepSeek Harness plugin that turns raw ecommerce data into daily decisions.
 
 回答老板每天早上问的四个问题 / Answers the four questions a founder asks every morning:
