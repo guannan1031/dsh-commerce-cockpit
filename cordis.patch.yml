@@ -1,0 +1,5 @@
+# dsh.bundle patch — 标准 DSH 插件组合行（dsh plugin add 安装后由 Loader 组合）
+- insert:
+    - id: commerce-cockpit
+      name: '@guannan1031/dsh-commerce-cockpit'
+      inject: [webServer, tools]
