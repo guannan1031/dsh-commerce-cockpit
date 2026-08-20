@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+
+      - name: Run tests
+        run: npm test
+
+      - name: Verify npm package contents
+        shell: bash
+        run: |
+          npm pack --dry-run --json > /tmp/dsh-commerce-package.json
+          node --input-type=commonjs - <<'NODE'
+          const fs = require("node:fs");
+          const packageInfo = JSON.parse(fs.readFileSync("/tmp/dsh-commerce-package.json", "utf8"))[0];
+          const files = new Set(packageInfo.files.map((file) => file.path));
+          const required = [
+            "LICENSE",
+            "README.md",
+            "client.js",
+            "cordis.patch.yml",
+            "index.js",
+            "package.json",
+            "templates/daily_sales.csv",
+          ];
+          const missing = required.filter((file) => !files.has(file));
+          const forbidden = [...files].filter((file) => file.startsWith("tests/") || file.startsWith("screenshots/"));
+          if (missing.length || forbidden.length) {
+            console.error({ missing, forbidden });
+            process.exit(1);
+          }
+          NODE
