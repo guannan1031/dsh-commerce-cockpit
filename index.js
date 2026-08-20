@@ -1,5 +1,5 @@
 /**
- * @ekzc/dsh-commerce-cockpit — host half (persistent)
+ * @guannan1031/dsh-commerce-cockpit — host half (persistent)
  *
  * Runs inside the `web` profile as a normal Cordis plugin. Owns:
  *   - the deterministic Demo ecommerce engine (channels x 30 days + SKU stock),
@@ -8,7 +8,7 @@
  *   - the model-visible `cockpit_ask` tool (natural-language Q&A),
  *   - the validated Imported CSV layer + persisted config in the workspace data/ dir.
  *
- * Branding (title/favicon/theme-color) is owned by @ekzc/dsh-whale-skin;
+ * Branding (title/favicon/theme-color) is owned by @guannan1031/dsh-whale-skin;
  * this plugin intentionally does not tap index.html. The client half
  * (client.js) provides the cockpit view, dock, sidebar entry and blue theme.
  */

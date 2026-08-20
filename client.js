@@ -1,5 +1,5 @@
 /**
- * @ekzc/dsh-commerce-cockpit — client half (plain JS bundle, React via require)
+ * @guannan1031/dsh-commerce-cockpit — client half (plain JS bundle, React via require)
  *
  * Loaded through `dsh-client-modules` into the browser boot graph. Mounts:
  *  - the "驾驶舱" view tab in the conversation view ring,
@@ -10,7 +10,7 @@
  * Data comes from the host half's JSON routes under /cockpit/api/* via fetch.
  */
 window.__ModuleLoader__.load({
-	id: "@ekzc/dsh-commerce-cockpit",
+	id: "@guannan1031/dsh-commerce-cockpit",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -445,10 +445,10 @@ window.__ModuleLoader__.load({
 `;
 		function ensureCss() {
 			if (typeof document === "undefined") return;
-			const tagId = "@ekzc/dsh-commerce-cockpit/styles";
+			const tagId = "@guannan1031/dsh-commerce-cockpit/styles";
 			if (document.querySelector("style[data-plugin-css=\"" + tagId + "\"]")) return;
 			const tag = document.createElement("style");
-			tag.dataset.plugin = "@ekzc/dsh-commerce-cockpit";
+			tag.dataset.plugin = "@guannan1031/dsh-commerce-cockpit";
 			tag.dataset.pluginCss = tagId;
 			tag.textContent = CSS;
 			document.head.appendChild(tag);
