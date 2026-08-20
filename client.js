@@ -1,5 +1,5 @@
 /**
- * @ekzc/dsh-commerce-cockpit — client half (plain JS bundle, React via require)
+ * @guannan1031/dsh-commerce-cockpit — client half (plain JS bundle, React via require)
  *
  * Loaded through `dsh-client-modules` into the browser boot graph. Mounts:
  *  - the "驾驶舱" view tab in the conversation view ring,
@@ -10,7 +10,7 @@
  * Data comes from the host half's JSON routes under /cockpit/api/* via fetch.
  */
 window.__ModuleLoader__.load({
-	id: "@ekzc/dsh-commerce-cockpit",
+	id: "@guannan1031/dsh-commerce-cockpit",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -25,8 +25,11 @@ window.__ModuleLoader__.load({
 
 		// ── helpers ─────────────────────────────────────────────────────────
 		function fmtMoney(v) {
+			if (v == null || !Number.isFinite(Number(v))) return "不可计算";
 			return "¥" + String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 		}
+		function fmtValue(v, suffix) { return v == null || !Number.isFinite(Number(v)) ? "不可计算" : String(v) + (suffix || ""); }
+		function fmtRatio(v) { return v == null || !Number.isFinite(Number(v)) ? "不可计算" : Number(v).toFixed(2); }
 		function fmtDelta(d) {
 			if (d == null || d === 0) return "持平";
 			const sign = d > 0 ? "↑ +" : "↓ -";
@@ -38,16 +41,18 @@ window.__ModuleLoader__.load({
 			const up = kpi.delta > 0.0001;
 			const down = kpi.delta < -0.0001;
 			const cls = up ? "cockpit-up" : (down ? "cockpit-down" : "cockpit-flat");
-			let value = String(kpi.value);
+			let value = kpi.value == null ? "不可计算" : String(kpi.value);
 			if (kpi.key === "gmv" || kpi.key === "profit" || kpi.key === "spend" || kpi.key === "aov") value = fmtMoney(kpi.value);
-			if (kpi.key === "conv") value = kpi.value + "%";
-			if (kpi.key === "roi") value = kpi.value.toFixed(2);
+			if (kpi.key === "conv") value = fmtValue(kpi.value, "%");
+			if (kpi.key === "roi") value = fmtRatio(kpi.value);
 			return React.createElement("div", { className: "kpi-card" },
 				React.createElement("div", { className: "kpi-label" }, kpi.label),
 				React.createElement("div", { className: "kpi-value" }, value),
 				React.createElement("div", { className: "kpi-delta " + cls }, fmtDelta(kpi.delta) + " 较昨日"));
 		}
 		function TrendChart({ id, points, stroke, label }) {
+			points = (points || []).filter((point) => point && Number.isFinite(Number(point.v)));
+			if (!points.length) return React.createElement("div", { className: "cockpit-chart-empty" }, label + "：不可计算");
 			const W = 560, H = 180, PAD = 26;
 			const values = points.map((p) => p.v);
 			const min = Math.min.apply(null, values);
@@ -128,7 +133,7 @@ window.__ModuleLoader__.load({
 								React.createElement("div", { className: "brief-num-value" }, n.value),
 								React.createElement("div", { className: "brief-num-delta" }, n.delta)))),
 						React.createElement("div", { className: "brief-section" },
-							React.createElement("div", { className: "brief-section-title" }, "今日要点"),
+							React.createElement("div", { className: "brief-section-title" }, "经营要点"),
 							brief.points.map((pnt, i) => React.createElement("div", { key: i, className: "brief-point" }, "· " + pnt.text))),
 						React.createElement("div", { className: "brief-section" },
 							React.createElement("div", { className: "brief-section-title" }, "首要行动"),
@@ -141,7 +146,7 @@ window.__ModuleLoader__.load({
 		}
 		function DataConfigCard({ onImported }) {
 			const [cfg, setCfg] = React.useState(null);
-			const [path, setPath] = React.useState("");
+			const [fileName, setFileName] = React.useState("");
 			const [thr, setThr] = React.useState("1.5");
 			const [store, setStore] = React.useState("");
 			const [busy, setBusy] = React.useState(null);
@@ -149,7 +154,7 @@ window.__ModuleLoader__.load({
 			const refresh = () => {
 				api("/cockpit/api/config").then((r) => {
 					setCfg(r.config);
-					setPath(r.config.csvPath);
+					setFileName(r.config.fileName || "");
 					setThr(String(r.config.roiThreshold));
 					setStore(r.config.storeName);
 				}).catch(() => {});
@@ -166,22 +171,22 @@ window.__ModuleLoader__.load({
 					if (onImported) onImported();
 				}).catch((e) => { setBusy(null); setMsg("操作失败：" + String(e && e.message || e)); });
 			};
-			const onImport = () => run("导入", api("/cockpit/api/import-csv", { path: path.trim() || undefined }));
-			const onClear = () => run("恢复 Mock", api("/cockpit/api/import-csv", { clear: true }));
+			const onImport = () => run("导入", api("/cockpit/api/import-csv", { fileName: fileName.trim() || undefined }));
+			const onClear = () => run("恢复演示数据", api("/cockpit/api/import-csv", { clear: true }));
 			const onTemplate = () => run("生成示例", api("/cockpit/api/export-template"));
-			const onSave = () => run("保存配置", api("/cockpit/api/config", { roiThreshold: parseFloat(thr), storeName: store, csvPath: path.trim() }));
+			const onSave = () => run("保存配置", api("/cockpit/api/config", { roiThreshold: parseFloat(thr), storeName: store, fileName: fileName.trim() }));
 			return React.createElement("div", { className: "cockpit-card" },
 				React.createElement("div", { className: "cockpit-card-title" }, "数据源与配置"),
 				React.createElement("div", { className: "cfg-status" },
-					React.createElement("span", { className: "source-chip " + (cfg && cfg.dataSource === "csv" ? "source-stale" : "") }, cfg && cfg.dataSource === "csv" ? "CSV 数据源" : "内置 Mock 数据"),
-					cfg && cfg.dataSource === "csv" ? React.createElement("span", { className: "cfg-file" }, "当前文件：" + cfg.csvPath.split("/").pop()) : React.createElement("span", { className: "cfg-file" }, "未导入 CSV，全部指标由 mock 生成")),
+					React.createElement("span", { className: "source-chip " + (cfg && cfg.dataSource === "imported" ? "source-stale" : "") }, cfg && cfg.dataSource === "imported" ? "Imported 数据" : "Demo 演示数据"),
+					cfg && cfg.dataSource === "imported" ? React.createElement("span", { className: "cfg-file" }, "当前文件：" + (cfg.fileName || "未设置")) : React.createElement("span", { className: "cfg-file" }, "演示数据｜业务日期 2026-08-15")),
 				React.createElement("div", { className: "cfg-row" },
-					React.createElement("input", { className: "cfg-input cfg-path", value: path, onChange: (e) => setPath(e.target.value), placeholder: "CSV 文件路径（date,channel,visitors,conv,aov,spend）" }),
+					React.createElement("input", { className: "cfg-input cfg-path", value: fileName, onChange: (e) => setFileName(e.target.value), placeholder: "导入目录内的文件名（business_date,platform,store_id,channel,...）" }),
 					React.createElement("button", { className: "cockpit-refresh", onClick: onImport, disabled: busy !== null }, busy === "导入" ? "导入中…" : "导入 CSV"),
 					React.createElement("button", { className: "cockpit-refresh", onClick: onTemplate, disabled: busy !== null }, "生成示例"),
-					React.createElement("button", { className: "cockpit-refresh", onClick: onClear, disabled: busy !== null }, "恢复 Mock")),
+					React.createElement("button", { className: "cockpit-refresh", onClick: onClear, disabled: busy !== null }, "恢复演示数据")),
 				React.createElement("div", { className: "cfg-row" },
-					React.createElement("label", { className: "cfg-label" }, "ROI 阈值"),
+					React.createElement("label", { className: "cfg-label" }, "投放产出比阈值"),
 					React.createElement("input", { className: "cfg-input cfg-small", type: "number", step: "0.1", value: thr, onChange: (e) => setThr(e.target.value) }),
 					React.createElement("label", { className: "cfg-label" }, "店铺名称"),
 					React.createElement("input", { className: "cfg-input cfg-mid", value: store, onChange: (e) => setStore(e.target.value) }),
@@ -228,7 +233,7 @@ window.__ModuleLoader__.load({
 					React.createElement("div", { className: "cockpit-logo" }, "电"),
 					React.createElement("div", { className: "cockpit-title-wrap" },
 						React.createElement("div", { className: "cockpit-title" }, "电商经营驾驶舱"),
-						React.createElement("div", { className: "cockpit-sub" }, d.store + " · 数据日期 " + d.asOf + " · 更新时间 08:30" + (d.dataSource === "csv" ? " · 数据源 CSV" : ""))),
+						React.createElement("div", { className: "cockpit-sub" }, (d.mode === "demo" ? "演示数据" : "导入数据") + " · 业务日期 " + (d.asOf || "不可用") + (d.mode === "demo" ? " · 固定快照" : " · 不回退Demo"))),
 					React.createElement("div", { className: "cockpit-header-right" },
 						React.createElement("button", { className: "cockpit-refresh", onClick: openBrief }, "生成简报"),
 						React.createElement("button", { className: "cockpit-refresh", onClick: refreshAll }, state.loading ? "刷新中…" : "刷新"))),
@@ -236,31 +241,31 @@ window.__ModuleLoader__.load({
 					d.kpis.map((k) => React.createElement(KpiCard, { key: k.key, kpi: k })),
 					React.createElement("div", { className: "kpi-card kpi-stock" },
 						React.createElement("div", { className: "kpi-label" }, "缺货预警"),
-						React.createElement("div", { className: "kpi-value" }, d.stockWarn),
-						React.createElement("div", { className: "kpi-delta " + (d.stockWarn > 0 ? "cockpit-warn" : "cockpit-flat") }, d.stockWarn > 0 ? "个 SKU 低于安全线" : "库存健康"))),
+						React.createElement("div", { className: "kpi-value" }, d.mode === "demo" ? d.stockWarn : "未接入"),
+						React.createElement("div", { className: "kpi-delta " + (d.mode === "demo" && d.stockWarn > 0 ? "cockpit-warn" : "cockpit-flat") }, d.mode === "demo" ? (d.stockWarn > 0 ? "个 SKU 低于安全线" : "库存健康") : "Imported未提供库存字段"))),
 				React.createElement("div", { className: "charts-row" },
 					React.createElement("div", { className: "cockpit-card" },
 						React.createElement("div", { className: "cockpit-card-title" }, "近 14 天销售趋势"),
 						React.createElement(TrendChart, { id: "gmv", points: gmvPoints, stroke: "#2563EB", label: "GMV" }),
-						React.createElement(TrendChart, { id: "profit", points: profitPoints, stroke: "#16A34A", label: "毛利" })),
+						d.mode === "demo" ? React.createElement(TrendChart, { id: "profit", points: profitPoints, stroke: "#16A34A", label: "估算经营贡献利润" }) : null),
 					React.createElement("div", { className: "cockpit-card" },
-						React.createElement("div", { className: "cockpit-card-title" }, "渠道分布（今日）"),
+						React.createElement("div", { className: "cockpit-card-title" }, "渠道分布（最新业务日）"),
 						d.channels.map((ch) => React.createElement("div", { key: ch.name, className: "channel-row" },
 							React.createElement("div", { className: "channel-name" }, ch.name),
 							React.createElement("div", { className: "channel-track" },
-								React.createElement("div", { className: "channel-bar", style: { width: Math.max(4, Math.round(ch.share * 100)) + "%" } })),
+								React.createElement("div", { className: "channel-bar", style: { width: ch.share == null ? "0%" : Math.max(4, Math.round(ch.share * 100)) + "%" } })),
 							React.createElement("div", { className: "channel-meta" },
-								fmtMoney(ch.gmv) + " · ROI " + ch.roi.toFixed(2) + " · " + fmtDelta(ch.delta)))))),
+								fmtMoney(ch.gmv) + " · 产出比 " + fmtRatio(ch.roi) + " · " + fmtDelta(ch.delta)))))),
 				React.createElement("div", { className: "cockpit-card" },
-					React.createElement("div", { className: "cockpit-card-title" }, "今日要点"),
+						React.createElement("div", { className: "cockpit-card-title" }, "经营要点"),
 					d.insights.map((ins, i) => React.createElement("div", { key: i, className: "insight" },
 						React.createElement("div", { className: "insight-dot dot-" + ins.level }),
 						React.createElement("div", null,
 							React.createElement("div", { className: "insight-title" }, ins.title),
 							React.createElement("div", { className: "insight-detail" }, ins.detail))))),
 				p2 ? React.createElement("div", null,
-					React.createElement(ActionsCard, { actions: p2.actions }),
-					React.createElement(AnomaliesCard, { anomalies: p2.anomalies }),
+					d.mode === "demo" ? React.createElement(ActionsCard, { actions: p2.actions }) : null,
+					d.mode === "demo" ? React.createElement(AnomaliesCard, { anomalies: p2.anomalies }) : null,
 					React.createElement(IntegrityCard, { integrity: p2.integrity }),
 					React.createElement(DataConfigCard, { onImported: refreshAll }))
 				: React.createElement("div", { className: "cockpit-card" },
@@ -279,12 +284,13 @@ window.__ModuleLoader__.load({
 			}, []);
 			const a = state.actions;
 			const summary = a ? a.dock : null;
+			const imported = a && a.mode === "imported";
 			return React.createElement("div", { className: "dock-actions" },
-				React.createElement("button", { className: "dock-actions-btn", onClick: () => setOpen(!open), title: "行动清单" },
-					React.createElement("span", { className: "dock-actions-ico" }, "📋"),
-					React.createElement("span", { className: "dock-actions-text" }, summary ? "行动清单 · " + summary.open + " 项待办 · 今天到期 " + summary.dueToday + " 项" + (summary.urgent > 0 ? " · 紧急 " + summary.urgent + " 项" : "") : (state.loading ? "行动清单加载中…" : "行动清单暂不可用")),
-					React.createElement("span", { className: "dock-actions-toggle" }, open ? "收起 ▴" : "展开 ▾")),
-				open && a ? React.createElement("div", { className: "dock-actions-panel" },
+					React.createElement("button", { className: "dock-actions-btn", onClick: () => setOpen(!open), title: "行动清单" },
+						React.createElement("span", { className: "dock-actions-ico" }, "📋"),
+						React.createElement("span", { className: "dock-actions-text" }, imported ? "Imported模式 · 行动未接入" : summary ? "行动清单 · " + summary.open + " 项待办 · 今天到期 " + summary.dueToday + " 项" + (summary.urgent > 0 ? " · 紧急 " + summary.urgent + " 项" : "") : (state.loading ? "行动清单加载中…" : "行动清单暂不可用")),
+						React.createElement("span", { className: "dock-actions-toggle" }, open ? "收起 ▴" : "展开 ▾")),
+				open && a && !imported ? React.createElement("div", { className: "dock-actions-panel" },
 					a.actions.map((t) => React.createElement("div", { key: t.id, className: "dock-actions-row" },
 						React.createElement("span", { className: "prio-badge prio-" + t.priority.toLowerCase() }, t.priority),
 						React.createElement("span", { className: "dock-actions-title" }, t.title),
@@ -308,13 +314,13 @@ window.__ModuleLoader__.load({
 					props.wide ? React.createElement("span", { className: "cockpit-entry-label" }, "驾驶舱") : null),
 				open ? React.createElement("div", { className: "cockpit-pop" },
 					React.createElement("div", { className: "cockpit-pop-head" },
-						React.createElement("b", null, "经营速览 · " + (data ? data.asOf : "")),
+						React.createElement("b", null, "经营速览 · " + (data ? (data.asOf || "不可用") : "")),
 						React.createElement("button", { className: "cockpit-pop-close", onClick: () => setOpen(false) }, "✕")),
 					data ? React.createElement("div", { className: "cockpit-pop-body" },
-						React.createElement("div", { className: "cockpit-pop-row" }, React.createElement("span", null, "今日销售额"), React.createElement("b", null, fmtMoney(data.gmv) + " " + fmtDelta(data.gmvDelta))),
-						React.createElement("div", { className: "cockpit-pop-row" }, React.createElement("span", null, "今日毛利"), React.createElement("b", null, fmtMoney(data.profit))),
-						React.createElement("div", { className: "cockpit-pop-row" }, React.createElement("span", null, "推广 ROI"), React.createElement("b", null, data.roi.toFixed(2))),
-						React.createElement("div", { className: "cockpit-pop-row" }, React.createElement("span", null, "缺货预警"), React.createElement("b", { className: data.stockWarn > 0 ? "cockpit-warn" : "" }, data.stockWarn + " 个")),
+						React.createElement("div", { className: "cockpit-pop-row" }, React.createElement("span", null, "销售额"), React.createElement("b", null, fmtMoney(data.gmv) + " " + fmtDelta(data.gmvDelta))),
+						data.mode === "demo" ? React.createElement("div", { className: "cockpit-pop-row" }, React.createElement("span", null, "估算经营贡献利润"), React.createElement("b", null, fmtMoney(data.profit))) : null,
+						React.createElement("div", { className: "cockpit-pop-row" }, React.createElement("span", null, "整体投放产出比"), React.createElement("b", null, fmtRatio(data.roi))),
+						data.mode === "demo" ? React.createElement("div", { className: "cockpit-pop-row" }, React.createElement("span", null, "缺货预警"), React.createElement("b", { className: data.stockWarn > 0 ? "cockpit-warn" : "" }, data.stockWarn + " 个")) : null,
 						React.createElement("div", { className: "cockpit-pop-hint" }, "完整视图请在会话顶部点击「驾驶舱」标签"))
 					: React.createElement("div", { className: "cockpit-pop-load" }, "加载中…"))
 				: null);
@@ -439,10 +445,10 @@ window.__ModuleLoader__.load({
 `;
 		function ensureCss() {
 			if (typeof document === "undefined") return;
-			const tagId = "@ekzc/dsh-commerce-cockpit/styles";
+			const tagId = "@guannan1031/dsh-commerce-cockpit/styles";
 			if (document.querySelector("style[data-plugin-css=\"" + tagId + "\"]")) return;
 			const tag = document.createElement("style");
-			tag.dataset.plugin = "@ekzc/dsh-commerce-cockpit";
+			tag.dataset.plugin = "@guannan1031/dsh-commerce-cockpit";
 			tag.dataset.pluginCss = tagId;
 			tag.textContent = CSS;
 			document.head.appendChild(tag);

@@ -1,48 +1,93 @@
-# 电商经营驾驶舱 · Ecommerce Business Cockpit
+# @guannan1031/dsh-commerce-cockpit
 
-> 面向电商老板的 DeepSeek Harness 常驻插件 — 从"数据报表"到"决策驾驶舱"。
+**电商经营驾驶舱 · Ecommerce Business Cockpit** 是一个可运行的 DeepSeek Harness 插件演示。
+
+> **演示数据｜业务日期 2026-08-15**
 >
-> 📲 **定制与合作 / Customization: 微信 WeChat `lijieai2025`（备注：电商驾驶舱定制）· guannan1031@gmail.com · guannan1031@163.com**
- —— 从"数据报表"到"决策驾驶舱"。
-> A persistent DeepSeek Harness plugin that turns raw ecommerce data into daily decisions.
+> 当前版本用于展示经营看板、数据完整性和规则式问数流程。它不连接真实电商平台，不会自动修改广告、库存、价格或订单，也不应作为真实经营决策依据。
 
-回答老板每天早上问的四个问题 / Answers the four questions a founder asks every morning:
-**今天哪里赚钱/亏钱 → 为什么变 → 下一步做什么 → 谁负责、何时完成**
+## 你可以看到
 
-### 界面截图 / Screenshots
+- 经营总览：销售额、推广花费、订单、转化率、客单价和趋势
+- Demo 模式下的估算经营贡献利润、模拟库存和演示行动清单
+- 数据完整性、缺失字段和不可计算项
+- 一页经营简报与 Markdown 导出
+- `cockpit_ask` 规则式问数：趋势、渠道对比和整体投放产出比
+- Imported 模式：读取指定目录中的标准 CSV，不会回退 Demo 数据
 
-![1 · 经营总览](screenshots/1-overview.png)
+## 两种数据模式
 
-![2 · 数据与要点](screenshots/2-detail.png)
+| 模式 | 数据来源 | 可展示内容 |
+| --- | --- | --- |
+| Demo | 固定种子演示快照 | 演示销售、估算贡献利润、模拟库存和演示行动 |
+| Imported | 用户放入指定目录的 CSV | 仅展示 CSV 实际提供且通过校验的销售、订单、访客、推广费 |
 
-![3 · 行动清单](screenshots/3-actions.png)
+Imported 模式缺少商品成本、退款、平台费、物流或库存字段时，会显示“不可计算”或隐藏相关模块，绝不会用 Demo 数值补齐。
 
-![4 · 任务 Dock](screenshots/4-dock.png)
+## 安装
 
-![5 · 老板简报](screenshots/5-brief.png)
+发布 `0.1.2` 后，使用 DeepSeek Harness 官方插件机制安装：
 
-## 功能亮点 / Highlights
+```bash
+dsh plugin --profile web add @guannan1031/dsh-commerce-cockpit@0.1.2
+dsh plugin --profile desktop add @guannan1031/dsh-commerce-cockpit@0.1.2
+```
 
-- **经营总览 Overview**：今日 GMV / 毛利 / 推广 ROI / 转化率 / 客单价 / 缺货预警 + 14 天趋势 + 渠道分布
-- **异常与机会 Anomalies**：四因子归因（流量/转化/客单）、推广浪费告警、缺货明细、竞品变化
-- **行动清单 Actions**：异常自动生成任务（优先级 / 负责人 / 截止时间）
-- **老板汇报 Brief**：一键生成一页经营简报（Markdown 导出）
-- **对话分析 Q&A**：`cockpit_ask` — "天猫今天为什么下滑？" 直接问
-- **数据接入 Data**：mock 演示 + CSV 导入覆盖（`date,channel,visitors,conv,aov,spend`）
+重启对应的 Harness profile 后，在会话顶部打开“驾驶舱”入口。
 
-## 安装 / Install
+## CSV 模板
 
-DeepSeek Harness Web profile 下，npm 包：`@guannan1031/dsh-commerce-cockpit`（已发布）+ `cordis.patch.yml` 一行，重启即常驻。详见安装说明。
+点击页面“生成示例”，或使用包内 `templates/daily_sales.csv`。文件需要放在：
 
-## 定制与合作 / Customization
+```text
+$DSH_HOME/imports/commerce-cockpit/
+```
 
-公开包为**混淆演示版**（功能完整可体验）。深度定制请直接联系作者：
+`DSH_HOME` 未设置时使用 `~/.dsh`。文件只能通过文件名导入，不能填写任意本机路径。
 
-**微信 lijieai2025（备注：电商驾驶舱定制）· guannan1031@gmail.com · guannan1031@163.com**
+最小字段为：
 
-- 真实店铺/平台数据接入（天猫/京东/拼多多/抖音/Shopify API 或报表）
-- 私有归因逻辑 / 专属报表 / 多店铺多品牌
-- 源码授权（私有交付 + 部署支持）
-- 持续迭代服务（新渠道/新指标/新规则）
+```text
+business_date,platform,store_id,channel,gmv,orders,visitors,ad_spend
+```
 
-> ⚠️ 演示数据为 2026-08-15 mock 快照，接入真实数据前请勿据此决策。
+唯一键为 `business_date + platform + store_id + channel`。空值与真实的 `0` 不同：订单为 `0` 时客单价不可计算，访客为 `0` 时转化率不可计算，推广费为 `0` 时整体投放产出比不可计算。
+
+文件限制：UTF-8 CSV、最大 5MB、最多 50000 行，不允许重复键、负数、非法日期、目录穿越或符号链接文件。
+
+## 口径与边界
+
+- Demo 的“估算经营贡献利润”是演示公式，不包含真实退款、仓储和物流口径。
+- “整体投放产出比”只表示 `GMV / 推广费`，不代表广告归因 ROI。
+- Imported 模式只回答有源数据支持的问题；缺少字段时会明确拒答。
+- 当前没有平台 API、自动任务执行、真实库存或真实竞品监控；Demo 中的库存与竞品仅为模拟，也不处理消费者个人信息。
+
+## 数据检查服务
+
+面向国内代运营团队的首个服务名称为：
+
+**7天多店日报对账与经营晨检试点**
+
+标准检查范围为一个国内平台、最多两个店铺、最近30天、最多3份脱敏 Excel/CSV。交付数据完整性、指标对账、不可计算项和最多3条有证据的问题；问题数量和金额以实际数据为准，不保证一定发现问题。
+
+合作联系：微信 `lijieai2025`（备注“电商经营晨检”）或邮箱 `guannan1031@gmail.com`。
+
+## 截图
+
+![经营总览](screenshots/1-overview.png)
+
+![数据与要点](screenshots/2-detail.png)
+
+![行动清单](screenshots/3-actions.png)
+
+![任务 Dock](screenshots/4-dock.png)
+
+![老板简报](screenshots/5-brief.png)
+
+## 开发
+
+```bash
+npm test
+```
+
+演示层按 MIT License 发布；商业客户的指标口径、数据映射和定制诊断服务不属于本 Demo 的功能承诺。

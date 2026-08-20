@@ -1,15 +1,17 @@
 {
   "name": "@guannan1031/dsh-commerce-cockpit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
-  "description": "Persistent ecommerce business cockpit for the DeepSeek Harness Web GUI: KPI overview, anomaly & attribution, action list, executive brief, natural-language Q&A (cockpit_ask), CSV import and persisted config. Survives host restarts.",
+  "description": "Runnable DeepSeek Harness ecommerce cockpit demo with explicit Demo/Imported data modes, CSV validation, metric overview and rule-based Q&A.",
   "type": "module",
   "main": "index.js",
   "files": [
     "index.js",
     "client.js",
     "README.md",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "LICENSE",
+    "templates"
   ],
   "exports": {
     ".": "./index.js",
@@ -30,6 +32,17 @@
     }
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/guannan1031/dsh-commerce-cockpit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/guannan1031/dsh-commerce-cockpit/issues"
+  },
+  "homepage": "https://github.com/guannan1031/dsh-commerce-cockpit",
+  "scripts": {
+    "test": "node --test tests/index.test.mjs"
+  },
   "dependencies": {
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6"
   }

@@ -1,0 +1,7 @@
+business_date,platform,store_id,channel,gmv,orders,visitors,ad_spend
+2026-08-14,天猫,tmall-main,搜索,12800,86,2400,1800
+2026-08-14,天猫,tmall-main,推荐,9200,58,1800,900
+2026-08-15,天猫,tmall-main,搜索,13100,89,2500,1900
+2026-08-15,天猫,tmall-main,推荐,8700,54,1750,980
+2026-08-14,京东,jd-main,搜索,7600,51,1600,1200
+2026-08-15,京东,jd-main,搜索,8100,55,1700,1250
