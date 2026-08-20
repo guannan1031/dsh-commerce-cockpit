@@ -2,28 +2,33 @@
  * @ekzc/dsh-commerce-cockpit — host half (persistent)
  *
  * Runs inside the `web` profile as a normal Cordis plugin. Owns:
- *   - the deterministic mock ecommerce engine (channels x 30 days + SKU stock),
+ *   - the deterministic Demo ecommerce engine (channels x 30 days + SKU stock),
  *   - JSON API routes under /cockpit/api/* (dashboard, p2, actions, brief,
  *     snapshot, config, import-csv, export-template) served by webServer,
  *   - the model-visible `cockpit_ask` tool (natural-language Q&A),
- *   - CSV override layer + persisted config in the workspace data/ dir.
+ *   - the validated Imported CSV layer + persisted config in the workspace data/ dir.
  *
  * Branding (title/favicon/theme-color) is owned by @ekzc/dsh-whale-skin;
  * this plugin intentionally does not tap index.html. The client half
  * (client.js) provides the cockpit view, dock, sidebar entry and blue theme.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
-const WORKSPACE = "/Users/ekzc/AI_Workspace/dsh-commerce-plugin";
-const DATA_DIR = join(WORKSPACE, "data");
+const DSH_HOME = process.env.DSH_HOME || join(homedir(), ".dsh");
+const DATA_DIR = join(DSH_HOME, "data", "commerce-cockpit");
+const IMPORT_DIR = join(DSH_HOME, "imports", "commerce-cockpit");
 const CONFIG_PATH = join(DATA_DIR, "cockpit-config.json");
-const TEMPLATE_PATH = join(DATA_DIR, "daily_sales.csv");
+const TEMPLATE_PATH = join(IMPORT_DIR, "daily_sales.csv");
+const DEMO_DATE = "2026-08-15";
+const CSV_HEADERS = ["business_date", "platform", "store_id", "channel", "gmv", "orders", "visitors", "ad_spend"];
 
-// ── deterministic mock engine ───────────────────────────────────────────────
+// ── deterministic Demo engine ───────────────────────────────────────────────
 function mulberry32(seed) {
 	let a = seed >>> 0;
 	return function () {
@@ -79,26 +84,41 @@ for (let i = 0; i < DAYS; i++) {
 	daily.push(day);
 }
 
-// ── config + CSV override (real fs, persists across restarts) ───────────────
-let config = { dataSource: "mock", csvPath: TEMPLATE_PATH, roiThreshold: 1.5, storeName: "星辰优选 · 咖啡事业部" };
-let csvOverride = null; // { 'MM-DD': { 渠道名: {visitors, conv, aov, spend} } }
+// ── config + imported data (real fs, persists across restarts) ──────────────
+let config = { dataSource: "demo", fileName: "daily_sales.csv", roiThreshold: 1.5, storeName: "星辰优选 · 咖啡事业部" };
+let importedRows = [];
+let importState = { status: "not_loaded", error: null, fileName: null, rows: 0 };
 
 function loadConfig() {
 	try {
 		if (existsSync(CONFIG_PATH)) {
 			const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-			if (parsed && typeof parsed === "object") config = { ...config, ...parsed };
+			if (parsed && typeof parsed === "object") {
+				config = { ...config, ...parsed };
+				if (config.dataSource === "mock" || config.dataSource === "csv") config.dataSource = config.dataSource === "csv" ? "imported" : "demo";
+				if (typeof parsed.csvPath === "string" && !parsed.fileName) config.fileName = basename(parsed.csvPath);
+				if (config.dataSource !== "imported") config.dataSource = "demo";
+				if (typeof config.fileName !== "string" || !config.fileName || config.fileName !== basename(config.fileName)) config.fileName = "daily_sales.csv";
+			}
 		}
 	} catch (_e) { /* first run */ }
 }
 function saveConfig() {
 	try {
 		mkdirSync(DATA_DIR, { recursive: true });
-		writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+		writeFileSync(CONFIG_PATH, JSON.stringify({
+			dataSource: config.dataSource,
+			fileName: config.fileName,
+			roiThreshold: config.roiThreshold,
+			storeName: config.storeName,
+		}, null, 2));
 		return { saved: true };
 	} catch (e) {
 		return { saved: false, reason: String(e && e.message || e) };
 	}
+}
+function configView() {
+	return { dataSource: config.dataSource, fileName: config.fileName, roiThreshold: config.roiThreshold, storeName: config.storeName, importDir: "DSH_HOME/imports/commerce-cockpit" };
 }
 function parseCsv(text) {
 	const rows = [];
@@ -124,65 +144,94 @@ function parseCsv(text) {
 	}
 	return rows;
 }
-function buildOverrideFromCsv(text) {
-	const rows = parseCsv(text);
-	if (rows.length < 2) return null;
+function isValidDate(value) {
+	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	if (!match) return false;
+	const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+	const date = new Date(Date.UTC(year, month - 1, day));
+	return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+function parseNullableNumber(value, label, rowNumber, integer = false) {
+	const raw = String(value ?? "").trim();
+	if (raw === "") return null;
+	const number = Number(raw);
+	if (!Number.isFinite(number) || number < 0 || (integer && !Number.isInteger(number))) throw new Error(`${label} 第${rowNumber}行不是有效的非负${integer ? "整数" : "数字"}`);
+	return number;
+}
+function parseImportedCsv(text) {
+	const rows = parseCsv(String(text).replace(/^\uFEFF/, ""));
+	if (rows.length < 2) throw new Error("CSV至少需要一行数据");
 	const header = rows[0].map((h) => h.trim());
-	const idx = {
-		date: header.indexOf("date"),
-		channel: header.indexOf("channel"),
-		visitors: header.indexOf("visitors"),
-		conv: header.indexOf("conv"),
-		aov: header.indexOf("aov"),
-		spend: header.indexOf("spend"),
-	};
-	if (idx.date < 0 || idx.channel < 0 || idx.visitors < 0 || idx.conv < 0 || idx.aov < 0) return null;
-	const override = {};
+	const missing = CSV_HEADERS.filter((name) => !header.includes(name));
+	if (missing.length) throw new Error("缺少字段：" + missing.join(", "));
+	const idx = Object.fromEntries(CSV_HEADERS.map((name) => [name, header.indexOf(name)]));
+	if (rows.length > 50001) throw new Error("CSV最多支持50000行数据");
+	const seen = new Set();
+	const parsed = [];
 	for (let r = 1; r < rows.length; r++) {
 		const row = rows[r];
-		const date = (row[idx.date] || "").trim();
-		const channel = (row[idx.channel] || "").trim();
-		if (!date || !CHANNELS.some((c) => c.name === channel)) continue;
-		const num = (k) => { const v = parseFloat(row[idx[k]]); return Number.isFinite(v) ? v : NaN; };
-		const visitors = Math.round(num("visitors"));
-		const conv = num("conv");
-		const aov = num("aov");
-		if (!Number.isFinite(visitors) || !Number.isFinite(conv) || !Number.isFinite(aov) || visitors <= 0 || conv <= 0 || aov <= 0) continue;
-		if (!override[date]) override[date] = {};
-		override[date][channel] = { visitors, conv, aov, spend: Number.isFinite(num("spend")) ? Math.round(num("spend")) : 0 };
+		if (!row.some((field) => String(field || "").trim() !== "")) continue;
+		const rowNumber = r + 1;
+		const businessDate = String(row[idx.business_date] || "").trim();
+		const platform = String(row[idx.platform] || "").trim();
+		const storeId = String(row[idx.store_id] || "").trim();
+		const channel = String(row[idx.channel] || "").trim();
+		if (!isValidDate(businessDate)) throw new Error(`business_date 第${rowNumber}行必须是YYYY-MM-DD`);
+		if (!platform || !storeId || !channel) throw new Error(`platform/store_id/channel 第${rowNumber}行不能为空`);
+		const key = [businessDate, platform, storeId, channel].join("\u001f");
+		if (seen.has(key)) throw new Error(`第${rowNumber}行与已有数据重复：${businessDate}/${platform}/${storeId}/${channel}`);
+		seen.add(key);
+		parsed.push({
+			businessDate, platform, storeId, channel,
+			gmv: parseNullableNumber(row[idx.gmv], "gmv", rowNumber),
+			orders: parseNullableNumber(row[idx.orders], "orders", rowNumber, true),
+			visitors: parseNullableNumber(row[idx.visitors], "visitors", rowNumber, true),
+			adSpend: parseNullableNumber(row[idx.ad_spend], "ad_spend", rowNumber),
+		});
 	}
-	return Object.keys(override).length > 0 ? override : null;
+	if (!parsed.length) throw new Error("CSV没有有效数据行");
+	return parsed;
 }
-function loadCsvOverride() {
-	csvOverride = null;
-	if (config.dataSource === "csv") {
-		try {
-			if (existsSync(config.csvPath)) csvOverride = buildOverrideFromCsv(readFileSync(config.csvPath, "utf8"));
-		} catch (_e) { /* keep mock */ }
+function importFilePath(fileName) {
+	const name = String(fileName || "").trim();
+	if (!name || name !== basename(name) || name === "." || name === "..") throw new Error("只允许填写导入目录内的文件名");
+	if (!/\.csv$/i.test(name)) throw new Error("只允许导入CSV文件");
+	const root = resolve(IMPORT_DIR);
+	const candidate = resolve(root, name);
+	if (relative(root, candidate).startsWith("..")) throw new Error("文件路径超出允许目录");
+	if (existsSync(candidate)) {
+		const stat = lstatSync(candidate);
+		if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("导入文件不能是符号链接或目录");
+		const real = realpathSync(candidate);
+		if (relative(root, real).startsWith("..")) throw new Error("文件真实路径超出允许目录");
+	}
+	return candidate;
+}
+function loadImportedFile() {
+	importedRows = [];
+	if (config.dataSource !== "imported") {
+		importState = { status: "not_loaded", error: null, fileName: null, rows: 0 };
+		return;
+	}
+	try {
+		const path = importFilePath(config.fileName);
+		if (!existsSync(path)) throw new Error("找不到导入文件：" + config.fileName);
+		const stat = lstatSync(path);
+		if (stat.size > 5 * 1024 * 1024) throw new Error("CSV文件不能超过5MB");
+		importedRows = parseImportedCsv(new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path)));
+		importState = { status: "ready", error: null, fileName: config.fileName, rows: importedRows.length };
+	} catch (error) {
+		importState = { status: "error", error: String(error && error.message || error), fileName: config.fileName, rows: 0 };
 	}
 }
 const TEMPLATE_CSV = [
-	"date,channel,visitors,conv,aov,spend",
-	"08-02,天猫旗舰店,11280,3.51,156.2,6100",
-	"08-02,京东自营,4980,2.85,145.8,2350",
-	"08-02,拼多多旗舰店,8120,4.05,110.5,3600",
-	"08-02,抖音小店,6540,2.31,126.4,4950",
-	"08-05,天猫旗舰店,11860,3.58,157.4,6250",
-	"08-05,京东自营,5210,2.92,146.3,2410",
-	"08-08,天猫旗舰店,12420,3.66,159.1,6400",
-	"08-08,京东自营,5520,2.98,147.2,2480",
-	"08-08,拼多多旗舰店,8690,4.12,111.8,3750",
-	"08-08,抖音小店,7010,2.38,127.6,5120",
-	"08-11,天猫旗舰店,12180,3.62,158.3,6320",
-	"08-11,京东自营,5390,2.95,146.8,2440",
-	"08-11,拼多多旗舰店,8510,4.09,111.2,3690",
-	"08-14,天猫旗舰店,11520,3.49,157.8,6180",
-	"08-14,京东自营,5080,2.88,145.9,2380",
-	"08-14,抖音小店,6680,2.29,127.1,5080",
-	"08-15,天猫旗舰店,11010,3.39,158.2,6220",
-	"08-15,京东自营,5486,2.91,146.1,2420",
-	"08-15,拼多多旗舰店,8340,4.06,111.5,3720",
-	"08-15,抖音小店,6903,2.36,127.9,6500",
+	"business_date,platform,store_id,channel,gmv,orders,visitors,ad_spend",
+	"2026-08-14,天猫,tmall-main,搜索,12800,86,2400,1800",
+	"2026-08-14,天猫,tmall-main,推荐,9200,58,1800,900",
+	"2026-08-15,天猫,tmall-main,搜索,13100,89,2500,1900",
+	"2026-08-15,天猫,tmall-main,推荐,8700,54,1750,980",
+	"2026-08-14,京东,jd-main,搜索,7600,51,1600,1200",
+	"2026-08-15,京东,jd-main,搜索,8100,55,1700,1250",
 	"",
 ].join("\n");
 
@@ -190,11 +239,10 @@ const TEMPLATE_CSV = [
 function metrics(i, c) {
 	const d = daily[i][c];
 	const base = CHANNELS[c];
-	const ov = csvOverride && csvOverride[dateLabel(i)] ? csvOverride[dateLabel(i)][base.name] : null;
-	const visitors = ov ? ov.visitors : d.visitors;
-	const conv = ov ? ov.conv : d.conv;
-	const aov = ov ? ov.aov : d.aov;
-	const spend = ov ? ov.spend : d.spend;
+	const visitors = d.visitors;
+	const conv = d.conv;
+	const aov = d.aov;
+	const spend = d.spend;
 	const gmv = visitors * (conv / 100) * aov;
 	const profit = gmv * (1 - base.costRate - base.platFee) - spend;
 	const orders = Math.round(visitors * (conv / 100));
@@ -214,6 +262,11 @@ function sumDay(i) {
 function round2(v) { return Math.round(v * 100) / 100; }
 function fmtInt(v) { return String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
 function fmtPct(d) { return (d >= 0 ? "+" : "") + (d * 100).toFixed(1) + "%"; }
+function fmtDelta(d) {
+	if (d == null || !Number.isFinite(Number(d))) return "不可计算";
+	if (d === 0) return "持平";
+	return (d > 0 ? "↑ +" : "↓ -") + Math.abs(d * 100).toFixed(1) + "%";
+}
 function clean(v) {
 	if (typeof v === "number") {
 		if (!Number.isFinite(v)) return 0;
@@ -227,14 +280,14 @@ function clean(v) {
 	}
 	return v;
 }
-function buildDashboard() {
+function buildDemoDashboard() {
 	const t = sumDay(DAYS - 1), y = sumDay(DAYS - 2);
 	const pct = (a, b) => b === 0 ? 0 : (a - b) / b;
 	const kpis = [
-		{ key: "gmv", label: "今日销售额", value: Math.round(t.gmv), delta: round2(pct(t.gmv, y.gmv)) },
-		{ key: "profit", label: "今日毛利", value: Math.round(t.profit), delta: round2(pct(t.profit, y.profit)) },
+		{ key: "gmv", label: "演示日销售额", value: Math.round(t.gmv), delta: round2(pct(t.gmv, y.gmv)) },
+		{ key: "profit", label: "估算经营贡献利润", value: Math.round(t.profit), delta: round2(pct(t.profit, y.profit)) },
 		{ key: "spend", label: "推广花费", value: Math.round(t.spend), delta: round2(pct(t.spend, y.spend)) },
-		{ key: "roi", label: "推广 ROI", value: round2(t.roi), delta: round2(pct(t.roi, y.roi)) },
+		{ key: "roi", label: "整体投放产出比", value: round2(t.roi), delta: round2(pct(t.roi, y.roi)) },
 		{ key: "orders", label: "订单数", value: t.orders, delta: round2(pct(t.orders, y.orders)) },
 		{ key: "conv", label: "转化率", value: round2(t.orders / t.visitors * 100), delta: round2(pct(t.orders / t.visitors, y.orders / y.visitors)) },
 		{ key: "aov", label: "客单价", value: round2(t.gmv / t.orders), delta: round2(pct(t.gmv / t.orders, y.gmv / y.orders)) },
@@ -263,18 +316,18 @@ function buildDashboard() {
 			insights.push({ level: "info", title: ch.name + "销售额环比上升 " + (ch.delta * 100).toFixed(1) + "%", detail: "建议保持当前投放节奏，复盘增长来源以便复制。" });
 		}
 		if (ch.roi < config.roiThreshold && ch.spend > 4000) {
-			insights.push({ level: "warn", title: ch.name + "推广 ROI " + ch.roi.toFixed(2) + " 低于 " + config.roiThreshold + " 阈值", detail: "今日花费 ¥" + fmtInt(ch.spend) + "，建议暂停低效计划并回撤预算至 ROI 更好的渠道。" });
+			insights.push({ level: "warn", title: ch.name + "整体投放产出比 " + ch.roi.toFixed(2) + " 低于 " + config.roiThreshold + " 阈值", detail: "演示日花费 ¥" + fmtInt(ch.spend) + "，建议暂停低效计划并回撤预算至产出比较高的渠道。" });
 		}
 	});
 	if (stockWarn > 0) {
 		const s = stockWarnList[0];
-		insights.push({ level: "error", title: stockWarn + " 个 SKU 库存低于安全线", detail: "其中「" + s.name + "」仅剩 " + s.stock + " 件（安全线 " + s.safe + "），预计影响今日销售，请尽快补货。" });
+		insights.push({ level: "error", title: stockWarn + " 个 SKU 库存低于安全线", detail: "其中「" + s.name + "」仅剩 " + s.stock + " 件（安全线 " + s.safe + "），预计影响演示日销售，请尽快补货。" });
 	}
 	const gmvPct = pct(t.gmv, y.gmv);
 	if (gmvPct >= 0) {
-		insights.push({ level: "info", title: "整体销售额环比 " + (gmvPct * 100).toFixed(1) + "%", detail: "今日总 GMV ¥" + fmtInt(t.gmv) + "，经营平稳。" });
+		insights.push({ level: "info", title: "演示日整体销售额环比 " + (gmvPct * 100).toFixed(1) + "%", detail: "演示日总 GMV ¥" + fmtInt(t.gmv) + "，经营平稳。" });
 	} else {
-		insights.push({ level: "warn", title: "整体销售额环比下降 " + (Math.abs(gmvPct) * 100).toFixed(1) + "%", detail: "今日总 GMV ¥" + fmtInt(t.gmv) + "，请结合上方渠道要点定位原因。" });
+		insights.push({ level: "warn", title: "演示日整体销售额环比下降 " + (Math.abs(gmvPct) * 100).toFixed(1) + "%", detail: "演示日总 GMV ¥" + fmtInt(t.gmv) + "，请结合上方渠道要点查看变化。" });
 	}
 	const sources = [
 		{ name: "生意参谋（天猫）", updated: "08-15 06:30", status: "ok" },
@@ -283,22 +336,19 @@ function buildDashboard() {
 		{ name: "抖店罗盘（抖音）", updated: "08-15 06:00", status: "ok" },
 		{ name: "评价中心", updated: "08-13 23:00", status: "stale" },
 	];
-	if (config.dataSource === "csv") {
-		sources.unshift({ name: "CSV 导入（" + config.csvPath.split("/").pop() + "）", updated: "已覆盖同日期同渠道", status: "ok" });
-	}
-	return { asOf: "2026-08-15", store: config.storeName, dataSource: config.dataSource, csvPath: config.csvPath, roiThreshold: config.roiThreshold, kpis, stockWarn, trend, channels, insights, sources };
+	return { mode: "demo", asOf: DEMO_DATE, store: config.storeName, dataSource: "demo", fileName: null, roiThreshold: config.roiThreshold, kpis, stockWarn, trend, channels, insights, sources };
 }
-function buildSnapshot() {
+function buildDemoSnapshot() {
 	const t = sumDay(DAYS - 1), y = sumDay(DAYS - 2);
 	const pct = (a, b) => b === 0 ? 0 : (a - b) / b;
 	return {
-		asOf: "2026-08-15",
+		mode: "demo", asOf: DEMO_DATE,
 		gmv: Math.round(t.gmv), gmvDelta: round2(pct(t.gmv, y.gmv)),
 		profit: Math.round(t.profit), roi: round2(t.roi),
 		stockWarn: SKUS.filter((s) => s.stock < s.safe).length,
 	};
 }
-function buildP2() {
+function buildDemoP2() {
 	const DAY = DAYS - 1;
 	const pct = (a, b) => b === 0 ? 0 : (a - b) / b;
 	const anomalies = [], actions = [];
@@ -306,7 +356,7 @@ function buildP2() {
 	const dg = pct(c0t.gmv, c0y.gmv);
 	if (dg <= -0.05) {
 		const dv = pct(c0t.visitors, c0y.visitors), dc = pct(c0t.conv, c0y.conv), da = pct(c0t.aov, c0y.aov);
-		anomalies.push({ id: "A1", level: "warn", type: "decline", title: "天猫旗舰店 GMV 环比下降 " + Math.abs(dg * 100).toFixed(1) + "%", detail: "四因子分解：流量 " + fmtPct(dv) + "、转化率 " + fmtPct(dc) + "、客单价 " + fmtPct(da) + "，主因是转化回落（大促后承接不足）。", factor: { visitors: round2(dv), conv: round2(dc), aov: round2(da), gmv: round2(dg) } });
+		anomalies.push({ id: "A1", level: "warn", type: "decline", title: "天猫旗舰店 GMV 环比下降 " + Math.abs(dg * 100).toFixed(1) + "%", detail: "指标变化拆解：流量 " + fmtPct(dv) + "、转化率 " + fmtPct(dc) + "、客单价 " + fmtPct(da) + "，演示判断为转化回落（大促后承接不足）。", factor: { visitors: round2(dv), conv: round2(dc), aov: round2(da), gmv: round2(dg) } });
 		actions.push({ id: "T1", title: "核查天猫流量结构与转化承接，针对下滑关键词优化详情页", owner: "林运营", due: "今天", priority: "P1", status: "待办", source: "A1" });
 	}
 	const PLANS = [
@@ -319,13 +369,13 @@ function buildP2() {
 	];
 	const waste = PLANS.filter((p) => p.roi < config.roiThreshold && p.spend >= 2000);
 	waste.forEach((p, i) => {
-		anomalies.push({ id: "A2", level: "warn", type: "waste", title: "推广浪费：" + p.channel + "「" + p.name + "」ROI " + p.roi.toFixed(2), detail: "今日花费 ¥" + fmtInt(p.spend) + "，低于 " + config.roiThreshold + " 阈值" + (p.channel === "抖音小店" ? "，点击转化率较昨日下降约 22%" : "") + "，建议暂停或下调出价。", factor: null });
-		if (i === 0) actions.push({ id: "T2", title: "暂停" + p.channel + "「" + p.name + "」并回撤预算至 ROI 更优计划", owner: "王投放", due: "今天", priority: "P1", status: "待办", source: "A2" });
+		anomalies.push({ id: "A2", level: "warn", type: "waste", title: "低效投放：" + p.channel + "「" + p.name + "」整体投放产出比 " + p.roi.toFixed(2), detail: "演示日花费 ¥" + fmtInt(p.spend) + "，低于 " + config.roiThreshold + " 阈值" + (p.channel === "抖音小店" ? "，点击转化率较前一日下降约 22%" : "") + "，建议暂停或下调出价。", factor: null });
+		if (i === 0) actions.push({ id: "T2", title: "暂停" + p.channel + "「" + p.name + "」并回撤预算至整体投放产出比较优计划", owner: "王投放", due: DEMO_DATE, priority: "P1", status: "待办", source: "A2" });
 	});
 	const stockWarnList = SKUS.filter((s) => s.stock < s.safe);
 	if (stockWarnList.length > 0) {
-		anomalies.push({ id: "A3", level: "error", type: "stockout", title: stockWarnList.length + " 个 SKU 库存低于安全线", detail: stockWarnList.map((s) => s.name + "（剩 " + s.stock + "/安全 " + s.safe + "）").join("、") + "。「" + stockWarnList[0].name + "」预计影响今日销售。", factor: null });
-		actions.push({ id: "T3", title: "补货：" + stockWarnList.slice(0, 3).map((s) => s.name).join("、") + " 等 " + stockWarnList.length + " 个 SKU", owner: "张供应链", due: "明天", priority: "P0", status: "待办", source: "A3" });
+		anomalies.push({ id: "A3", level: "error", type: "stockout", title: stockWarnList.length + " 个 SKU 库存低于安全线", detail: stockWarnList.map((s) => s.name + "（剩 " + s.stock + "/安全 " + s.safe + "）").join("、") + "。「" + stockWarnList[0].name + "」预计影响演示日销售。", factor: null });
+		actions.push({ id: "T3", title: "补货：" + stockWarnList.slice(0, 3).map((s) => s.name).join("、") + " 等 " + stockWarnList.length + " 个 SKU", owner: "张供应链", due: DEMO_DATE, priority: "P0", status: "待办", source: "A3" });
 	}
 	const COMPETITORS = [
 		{ brand: "瑞幸咖啡", sku: "生椰拿铁（同类）", price: 9.9, prevPrice: 12.9, activity: "全场 9.9 元促销（08-14 起）" },
@@ -348,11 +398,11 @@ function buildP2() {
 	const integrity = {
 		missing: [
 			{ source: "评价中心", scope: "08-14 至 08-15 评价数据", impact: "无法计算评分变化与差评预警", since: "08-14 22:00" },
-			{ source: "抖店罗盘", scope: "今日直播间分时 GMV", impact: "无法归因直播时段投放效果", since: "08-15 09:00" },
+			{ source: "抖店罗盘", scope: "业务日直播间分时 GMV", impact: "无法归因直播时段投放效果", since: "08-15 09:00" },
 		],
 		uncomputable: [
 			{ metric: "复购率", reason: "缺少会员标签数据（尚未接入）" },
-			{ metric: "拉新 ROI", reason: "新老客拆分字段缺失" },
+			{ metric: "拉新投放产出比", reason: "新老客拆分字段缺失" },
 			{ metric: "京东仓库存周转天数", reason: "库存快照延迟 3 天" },
 		],
 		sources: [
@@ -370,14 +420,14 @@ function buildP2() {
 	};
 	return { anomalies, actions, integrity, dock };
 }
-function buildBrief() {
-	const d = buildDashboard(), p = buildP2();
+function buildDemoBrief() {
+	const d = buildDemoDashboard(), p = buildDemoP2();
 	const gmvKpi = d.kpis[0], profitKpi = d.kpis[1], roiKpi = d.kpis[3];
-	const verdict = "今日总 GMV ¥" + fmtInt(gmvKpi.value) + "（环比 " + fmtPct(gmvKpi.delta) + "），毛利 ¥" + fmtInt(profitKpi.value) + "，经营整体" + (gmvKpi.delta >= 0 ? "平稳" : "承压") + "；主要风险为天猫转化回落与推广 ROI 偏低，已生成 " + p.dock.open + " 项行动。";
+	const verdict = "演示业务日总 GMV ¥" + fmtInt(gmvKpi.value) + "（环比 " + fmtPct(gmvKpi.delta) + "），估算经营贡献利润 ¥" + fmtInt(profitKpi.value) + "，经营整体" + (gmvKpi.delta >= 0 ? "平稳" : "承压") + "；主要风险为天猫转化回落与整体投放产出比较低，已生成 " + p.dock.open + " 项演示行动。";
 	const numbers = [
-		{ label: "今日 GMV", value: "¥" + fmtInt(gmvKpi.value), delta: fmtPct(gmvKpi.delta) },
-		{ label: "今日毛利", value: "¥" + fmtInt(profitKpi.value), delta: fmtPct(profitKpi.delta) },
-		{ label: "推广 ROI", value: roiKpi.value.toFixed(2), delta: fmtPct(roiKpi.delta) },
+		{ label: "演示日 GMV", value: "¥" + fmtInt(gmvKpi.value), delta: fmtPct(gmvKpi.delta) },
+		{ label: "估算经营贡献利润", value: "¥" + fmtInt(profitKpi.value), delta: fmtPct(profitKpi.delta) },
+		{ label: "整体投放产出比", value: roiKpi.value.toFixed(2), delta: fmtPct(roiKpi.delta) },
 		{ label: "缺货预警", value: d.stockWarn + " 个", delta: d.stockWarn > 0 ? "需处理" : "正常" },
 		{ label: "待办行动", value: p.dock.open + " 项", delta: p.dock.dueToday + " 项今天到期" },
 	];
@@ -388,12 +438,12 @@ function buildBrief() {
 		{ title: "评价中心数据延迟 2 天", detail: "评分趋势与差评预警暂不可用，修复任务进行中" },
 	];
 	const caveats = [
-		"利润口径：GMV − 商品成本 − 推广费 − 平台费（含佣金与服务费，不含退货与仓储）",
-		"ROI 为今日实时口径（15 天转化窗口待接入真实数据后启用）",
-		"数据源：" + (d.dataSource === "csv" ? "CSV 导入（" + d.csvPath + "）" : "内置 mock 快照") + "，ROI 阈值 " + d.roiThreshold,
+		"估算口径：GMV − 模拟商品成本 − 推广费 − 模拟平台费（不含退货与仓储）",
+		"整体投放产出比 = GMV / 推广费，不代表广告归因ROI",
+		"数据源：内置演示快照，业务日期 " + DEMO_DATE + "，阈值 " + d.roiThreshold,
 	];
 	const markdown = [
-		"# " + d.store + " 经营日报（2026-08-15）",
+		"# " + d.store + " 经营日报（演示数据｜业务日期 " + DEMO_DATE + "）",
 		"",
 		"## 一句话结论",
 		verdict,
@@ -403,7 +453,7 @@ function buildBrief() {
 		"| --- | --- | --- |",
 		...numbers.map((n) => "| " + n.label + " | " + n.value + " | " + n.delta + " |"),
 		"",
-		"## 今日要点",
+		"## 经营要点",
 		...points.map((pnt) => "- " + pnt.text),
 		"",
 		"## 首要行动",
@@ -415,9 +465,136 @@ function buildBrief() {
 		"## 数据口径",
 		...caveats.map((c) => "- " + c),
 	].join("\n");
-	return { title: d.store + " 经营日报", date: "2026-08-15", verdict, numbers, points, topActions, risks, caveats, markdown };
+	return { title: d.store + " 经营日报（演示）", date: DEMO_DATE, verdict, numbers, points, topActions, risks, caveats, markdown };
 }
-function answerQuestion(question) {
+function importedDates() { return [...new Set(importedRows.map((row) => row.businessDate))].sort(); }
+function importedRowsFor(date, predicate = () => true) { return importedRows.filter((row) => row.businessDate === date && predicate(row)); }
+function sumField(rows, field) {
+	if (!rows.length || rows.some((row) => typeof row[field] !== "number")) return null;
+	return rows.reduce((sum, row) => sum + row[field], 0);
+}
+function importedAggregate(date, predicate = () => true) {
+	const rows = importedRowsFor(date, predicate);
+	return {
+		rows: rows.length,
+		gmv: sumField(rows, "gmv"),
+		orders: sumField(rows, "orders"),
+		visitors: sumField(rows, "visitors"),
+		adSpend: sumField(rows, "adSpend"),
+	};
+}
+function ratio(numerator, denominator) { return typeof numerator === "number" && typeof denominator === "number" && denominator > 0 ? numerator / denominator : null; }
+function delta(current, previous) { return typeof current === "number" && typeof previous === "number" && previous !== 0 ? (current - previous) / previous : null; }
+function importedKpi(key, label, value, previous, formatter = "number") {
+	return { key, label, value: value == null ? null : round2(value), delta: delta(value, previous), formatter };
+}
+function importedCapabilities(latestRows) {
+	const fields = ["gmv", "orders", "visitors", "adSpend"];
+	return Object.fromEntries(fields.map((field) => [field, latestRows.length > 0 && latestRows.every((row) => typeof row[field] === "number")]));
+}
+function buildImportedDashboard() {
+	const dates = importedDates();
+	if (importState.status !== "ready" || !dates.length) {
+		return {
+			mode: "imported", asOf: null, store: config.storeName, dataSource: "imported", fileName: config.fileName,
+			importError: importState.error || "没有可用导入数据", availableCapabilities: {},
+			kpis: [], trend: [], channels: [], insights: [{ level: "error", title: "导入数据不可用", detail: importState.error || "请先将符合模板的CSV放入指定导入目录。" }],
+			stockWarn: null, sources: [], roiThreshold: config.roiThreshold,
+		};
+	}
+	const latest = dates[dates.length - 1], previous = dates.length > 1 ? dates[dates.length - 2] : null;
+	const current = importedAggregate(latest), prior = previous ? importedAggregate(previous) : null;
+	const latestRows = importedRowsFor(latest);
+	const kpis = [
+		importedKpi("gmv", "销售额", current.gmv, prior && prior.gmv, "money"),
+		importedKpi("spend", "推广花费", current.adSpend, prior && prior.adSpend, "money"),
+		importedKpi("roi", "整体投放产出比", ratio(current.gmv, current.adSpend), prior && ratio(prior.gmv, prior.adSpend)),
+		importedKpi("orders", "订单数", current.orders, prior && prior.orders),
+		importedKpi("conv", "转化率", ratio(current.orders, current.visitors) == null ? null : ratio(current.orders, current.visitors) * 100, prior && (ratio(prior.orders, prior.visitors) == null ? null : ratio(prior.orders, prior.visitors) * 100), "percent"),
+		importedKpi("aov", "客单价", ratio(current.gmv, current.orders), prior && ratio(prior.gmv, prior.orders), "money"),
+	];
+	const previousGroups = new Map(importedRowsFor(previous || "").map((row) => [[row.platform, row.storeId, row.channel].join("\u001f"), row]));
+	const groups = new Map();
+	for (const row of latestRows) {
+		const key = [row.platform, row.storeId, row.channel].join("\u001f");
+		const entry = groups.get(key) || { name: row.platform + "/" + row.storeId + "/" + row.channel, rows: [] };
+		entry.rows.push(row);
+		groups.set(key, entry);
+	}
+	const channels = [...groups.entries()].map(([key, entry]) => {
+		const old = previousGroups.get(key);
+		const groupGmv = sumField(entry.rows, "gmv");
+		const groupAdSpend = sumField(entry.rows, "adSpend");
+		return { name: entry.name, gmv: groupGmv == null ? null : Math.round(groupGmv), share: current.gmv > 0 && groupGmv != null ? groupGmv / current.gmv : null, roi: ratio(groupGmv, groupAdSpend), spend: groupAdSpend == null ? null : Math.round(groupAdSpend), delta: old ? delta(groupGmv, old.gmv) : null };
+	});
+	const insights = [{ level: "info", title: "Imported模式仅使用导入文件", detail: "系统不会补入演示数据；库存、成本、退款、平台费和负责人数据未接入。" }];
+	const missing = ["gmv", "orders", "visitors", "ad_spend"].filter((field) => latestRows.some((row) => row[field] == null));
+	if (missing.length) insights.push({ level: "warn", title: "最新业务日存在缺失字段", detail: missing.join(", ") + "含空值，相关指标将显示为不可计算或部分汇总。" });
+	const trend = dates.slice(-14).map((date) => {
+		const summary = importedAggregate(date);
+		return summary.gmv == null ? null : { date, gmv: Math.round(summary.gmv), profit: null };
+	}).filter(Boolean);
+	return {
+		mode: "imported", asOf: latest, store: config.storeName, dataSource: "imported", fileName: config.fileName,
+		availableCapabilities: importedCapabilities(latestRows), kpis, trend, channels, insights, stockWarn: null,
+		roiThreshold: config.roiThreshold, sources: [{ name: "CSV导入（" + config.fileName + "）", updated: "已校验", status: "ok" }],
+	};
+}
+function buildImportedSnapshot() {
+	const d = buildImportedDashboard();
+	const find = (key) => d.kpis.find((kpi) => kpi.key === key);
+	return { mode: "imported", asOf: d.asOf, gmv: find("gmv")?.value ?? null, gmvDelta: find("gmv")?.delta ?? null, profit: null, roi: find("roi")?.value ?? null, stockWarn: null, fileName: d.fileName };
+}
+function buildImportedP2() {
+	const d = buildImportedDashboard();
+	const uncomputable = [
+		{ metric: "经营贡献利润", reason: "缺少商品成本、退款和平台费字段" },
+		{ metric: "库存预警", reason: "模板未包含库存字段" },
+		{ metric: "负责人行动", reason: "Imported模式不生成虚构负责人和行动结果" },
+	];
+	return { mode: "imported", anomalies: [], actions: [], integrity: { missing: [], uncomputable, sources: d.sources }, dock: { open: 0, dueToday: 0, urgent: 0 } };
+}
+function buildImportedBrief() {
+	const d = buildImportedDashboard();
+	const available = d.kpis.filter((kpi) => kpi.value != null);
+	const numbers = available.map((kpi) => ({ label: kpi.label, value: kpi.formatter === "money" ? "¥" + fmtInt(kpi.value) : kpi.formatter === "percent" ? kpi.value.toFixed(2) + "%" : String(kpi.value), delta: fmtDelta(kpi.delta) }));
+	const verdict = d.asOf ? "最新业务日 " + d.asOf + " 的导入数据已完成汇总；当前仅回答文件中提供的经营指标，未接入成本、退款、平台费和库存。" : "导入数据不可用，无法生成经营简报。";
+	const points = d.insights.map((insight) => ({ level: insight.level, text: insight.title + "：" + insight.detail }));
+	const caveats = ["数据模式：Imported，不会回退Demo", "不可计算项：经营贡献利润、库存预警、负责人行动", "数据源：" + (d.fileName || "未导入")];
+	const markdown = ["# " + d.store + " 经营数据检查（" + (d.asOf || "无日期") + "）", "", "## 一句话结论", verdict, "", "## 可用指标", "| 指标 | 数值 | 变化 |", "| --- | --- | --- |", ...numbers.map((n) => "| " + n.label + " | " + n.value + " | " + n.delta + " |"), "", "## 数据限制", ...caveats.map((caveat) => "- " + caveat)].join("\n");
+	return { title: d.store + " 经营数据检查", date: d.asOf || "不可用", verdict, numbers, points, topActions: [], risks: [], caveats, markdown };
+}
+function answerImportedQuestion(question) {
+	const d = buildImportedDashboard();
+	if (d.importError) return { answer: "当前导入数据不可用：" + d.importError + "。系统没有使用Demo数据替代。", chart: null };
+	const q = String(question || "").toLowerCase();
+	if (["利润", "毛利", "成本", "退款", "平台费", "库存", "缺货", "竞品", "负责人", "行动"].some((word) => q.includes(word))) return { answer: "当前Imported模板没有支持这个问题所需的数据字段，不能用演示数据补答。请提供对应的成本、退款、平台费、库存或行动字段。", chart: null };
+	const dates = importedDates();
+	const latest = dates[dates.length - 1];
+	const matches = (row) => [row.platform, row.storeId, row.channel].some((value) => q.includes(String(value).toLowerCase()));
+	const predicate = importedRows.some(matches) ? matches : () => true;
+	if (["趋势", "走势", "近7天", "近七天", "最近"].some((word) => q.includes(word))) {
+		const series = dates.slice(-7).map((date) => ({ label: date, gmv: sumField(importedRowsFor(date, predicate), "gmv") })).filter((point) => point.gmv != null);
+		return series.length ? { answer: "最新导入数据的销售额趋势：" + series.map((point) => point.label + " ¥" + fmtInt(point.gmv)).join("、") + "。", chart: { type: "line", title: "导入数据销售额趋势", series } } : { answer: "当前数据没有可用于趋势分析的GMV。", chart: null };
+	}
+	if (["roi", "投产", "推广", "广告"].some((word) => q.includes(word))) {
+		const rows = d.channels.filter((row) => row.roi != null).sort((a, b) => a.roi - b.roi);
+		return rows.length ? { answer: "最新业务日整体投放产出比从低到高：" + rows.map((row) => row.name + " " + row.roi.toFixed(2)).join("、") + "。该指标为GMV/推广费，不代表归因ROI。", chart: { type: "bar", title: "整体投放产出比", series: rows.map((row) => ({ label: row.name, value: row.roi })) } } : { answer: "当前数据没有可计算的整体投放产出比。", chart: null };
+	}
+	const summary = importedAggregate(latest, predicate);
+	const parts = [];
+	if (summary.gmv != null) parts.push("销售额 ¥" + fmtInt(summary.gmv));
+	if (summary.orders != null) parts.push("订单 " + fmtInt(summary.orders) + " 单");
+	if (summary.visitors != null) parts.push("访客 " + fmtInt(summary.visitors));
+	if (summary.adSpend != null) parts.push("推广费 ¥" + fmtInt(summary.adSpend));
+	return { answer: "最新业务日 " + latest + " 的导入数据：" + (parts.length ? parts.join("、") : "没有可计算指标") + "。", chart: null };
+}
+function buildDashboard() { return config.dataSource === "imported" ? buildImportedDashboard() : buildDemoDashboard(); }
+function buildSnapshot() { return config.dataSource === "imported" ? buildImportedSnapshot() : buildDemoSnapshot(); }
+function buildP2() { return config.dataSource === "imported" ? buildImportedP2() : buildDemoP2(); }
+function buildBrief() { return config.dataSource === "imported" ? buildImportedBrief() : buildDemoBrief(); }
+function answerQuestion(question) { return config.dataSource === "imported" ? answerImportedQuestion(question) : answerDemoQuestion(question); }
+function answerDemoQuestion(question) {
 	const q = String(question || "").toLowerCase();
 	const has = (words) => words.some((w) => q.includes(w));
 	const DAY = DAYS - 1;
@@ -436,7 +613,7 @@ function answerQuestion(question) {
 			trend.push({ label: dateLabel(i), gmv: Math.round(m.gmv) });
 		}
 		return {
-			answer: name + (dg >= 0 ? "今日销售额上升 " : "今日销售额下降 ") + Math.abs(dg * 100).toFixed(1) + "%，四因子分解：流量 " + fmtPct(pct(t.visitors, y.visitors)) + "、转化率 " + fmtPct(pct(t.conv, y.conv)) + "、客单价 " + fmtPct(pct(t.aov, y.aov)) + "。" + (dg < 0 ? "主因是转化回落（大促后承接不足），建议核查流量结构与详情页转化。" : "主因是访客增长，建议复盘来源并固化打法。"),
+			answer: name + (dg >= 0 ? "演示日销售额上升 " : "演示日销售额下降 ") + Math.abs(dg * 100).toFixed(1) + "%，指标变化拆解：流量 " + fmtPct(pct(t.visitors, y.visitors)) + "、转化率 " + fmtPct(pct(t.conv, y.conv)) + "、客单价 " + fmtPct(pct(t.aov, y.aov)) + "。" + (dg < 0 ? "演示判断为转化回落（大促后承接不足），建议核查流量结构与详情页转化。" : "演示判断为访客增长，建议复盘来源并固化打法。"),
 			chart: { type: "line", title: name + " 近 7 天销售额", series: trend },
 		};
 	}
@@ -456,8 +633,8 @@ function answerQuestion(question) {
 	if (has(["roi", "投产", "回报", "浪费"])) {
 		const rows = CHANNELS.map((c, i) => ({ name: c.name, roi: round2(metrics(DAY, i).roi), spend: Math.round(metrics(DAY, i).spend) })).sort((a, b) => a.roi - b.roi);
 		return {
-			answer: "今日各渠道推广 ROI 从低到高：" + rows.map((r) => r.name + " " + r.roi.toFixed(2)).join("、") + "。" + (rows[0].roi < config.roiThreshold ? rows[0].name + " ROI 最低且低于 " + config.roiThreshold + " 阈值（花费 ¥" + fmtInt(rows[0].spend) + "），已触发浪费告警，建议暂停低效计划。" : "整体投放效率正常。"),
-			chart: { type: "bar", title: "各渠道推广 ROI（今日）", series: rows.map((r) => ({ label: r.name, value: r.roi })) },
+			answer: "演示日各渠道整体投放产出比从低到高：" + rows.map((r) => r.name + " " + r.roi.toFixed(2)).join("、") + "。" + (rows[0].roi < config.roiThreshold ? rows[0].name + " 整体投放产出比最低且低于 " + config.roiThreshold + " 阈值（花费 ¥" + fmtInt(rows[0].spend) + "），已触发演示告警，建议暂停低效计划。" : "演示数据中的整体投放效率正常。"),
+			chart: { type: "bar", title: "各渠道整体投放产出比（演示日）", series: rows.map((r) => ({ label: r.name, value: r.roi })) },
 		};
 	}
 	if (has(["缺货", "库存"])) {
@@ -469,7 +646,7 @@ function answerQuestion(question) {
 	}
 	const t = sumDay(DAY), y = sumDay(DAY - 1);
 	return {
-		answer: "今日经营总览：GMV ¥" + fmtInt(t.gmv) + "（环比 " + fmtPct(pct(t.gmv, y.gmv)) + "）、毛利 ¥" + fmtInt(t.profit) + "、推广花费 ¥" + fmtInt(t.spend) + "、ROI " + t.roi.toFixed(2) + "、订单 " + t.orders + " 单。可用「天猫为什么下滑」「近7天趋势」「哪个渠道ROI最低」「缺货情况」等提问获取更细分析。",
+		answer: "演示日经营总览：GMV ¥" + fmtInt(t.gmv) + "（环比 " + fmtPct(pct(t.gmv, y.gmv)) + "）、估算经营贡献利润 ¥" + fmtInt(t.profit) + "、推广花费 ¥" + fmtInt(t.spend) + "、整体投放产出比 " + t.roi.toFixed(2) + "、订单 " + t.orders + " 单。可用「天猫为什么下滑」「近7天趋势」「哪个渠道投放产出比最低」「缺货情况」等提问获取更细分析。",
 		chart: null,
 	};
 }
@@ -493,7 +670,7 @@ function readBody(req) {
 }
 function apply(ctx) {
 	loadConfig();
-	loadCsvOverride();
+	loadImportedFile();
 
 	const safeRegister = (path, handler, label) => {
 		try {
@@ -508,54 +685,60 @@ function apply(ctx) {
 	safeRegister("/cockpit/api/dashboard", api(buildDashboard), "cockpit: dashboard");
 	safeRegister("/cockpit/api/snapshot", api(buildSnapshot), "cockpit: snapshot");
 	safeRegister("/cockpit/api/p2", api(buildP2), "cockpit: p2");
-	safeRegister("/cockpit/api/actions", api(() => { const p = buildP2(); return { dock: p.dock, actions: p.actions }; }), "cockpit: actions");
+	safeRegister("/cockpit/api/actions", api(() => { const p = buildP2(); return { mode: p.mode || "demo", dock: p.dock, actions: p.actions }; }), "cockpit: actions");
 	safeRegister("/cockpit/api/brief", api(buildBrief), "cockpit: brief");
 	safeRegister("/cockpit/api/config", async (req, res) => {
-		if (req.method === "GET") return json(res, 200, { config });
+		if (req.method === "GET") return json(res, 200, { config: configView(), importState });
 		const body = await readBody(req);
 		if (typeof body.roiThreshold === "number" && Number.isFinite(body.roiThreshold) && body.roiThreshold > 0) config.roiThreshold = body.roiThreshold;
 		if (typeof body.storeName === "string" && body.storeName.trim()) config.storeName = body.storeName.trim();
-		if (typeof body.csvPath === "string" && body.csvPath.trim()) config.csvPath = body.csvPath.trim();
+		if (typeof body.fileName === "string" && body.fileName.trim()) {
+			try { importFilePath(body.fileName.trim()); config.fileName = basename(body.fileName.trim()); } catch (error) { return json(res, 400, { ok: false, error: String(error && error.message || error) }); }
+		}
 		const save = saveConfig();
-		return json(res, 200, { config, save });
+		loadImportedFile();
+		return json(res, 200, { config: configView(), importState, save });
 	}, "cockpit: config");
 	safeRegister("/cockpit/api/import-csv", async (req, res) => {
 		const body = await readBody(req);
 		if (body.clear) {
-			csvOverride = null;
-			config.dataSource = "mock";
+			importedRows = [];
+			config.dataSource = "demo";
 			const save = saveConfig();
-			return json(res, 200, { ok: true, cleared: true, save });
+			loadImportedFile();
+			return json(res, 200, { ok: true, cleared: true, mode: "demo", save });
 		}
-		const path = body.path || config.csvPath;
 		try {
-			const text = readFileSync(String(path), "utf8");
-			const rows = text.split("\n").filter((l) => l.trim() !== "").length - 1;
-			const override = buildOverrideFromCsv(text);
-			if (!override) return json(res, 200, { ok: false, error: "CSV 解析失败：需要 date,channel,visitors,conv,aov,spend 列且含有效数据行" });
-			csvOverride = override;
-			config.dataSource = "csv";
-			config.csvPath = String(path);
+			const fileName = String(body.fileName || config.fileName || "").trim();
+			const path = importFilePath(fileName);
+			if (!existsSync(path)) throw new Error("找不到导入文件：" + fileName);
+			const stat = lstatSync(path);
+			if (stat.size > 5 * 1024 * 1024) throw new Error("CSV文件不能超过5MB");
+			const rowsData = parseImportedCsv(new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path)));
+			importedRows = rowsData;
+			config.dataSource = "imported";
+			config.fileName = basename(fileName);
+			importState = { status: "ready", error: null, fileName: config.fileName, rows: rowsData.length };
 			const save = saveConfig();
-			return json(res, 200, { ok: true, rows, covered: Object.keys(override).reduce((n, d) => n + Object.keys(override[d]).length, 0), dates: Object.keys(override).length, save });
+			return json(res, 200, { ok: true, mode: "imported", rows: rowsData.length, dates: new Set(rowsData.map((row) => row.businessDate)).size, save });
 		} catch (e) {
-			return json(res, 200, { ok: false, error: "读取文件失败：" + String(e && e.message || e) });
+			return json(res, 400, { ok: false, error: "读取文件失败：" + String(e && e.message || e) });
 		}
 	}, "cockpit: import-csv");
 	safeRegister("/cockpit/api/export-template", async (_req, res) => {
 		try {
-			mkdirSync(DATA_DIR, { recursive: true });
+			mkdirSync(IMPORT_DIR, { recursive: true });
 			writeFileSync(TEMPLATE_PATH, TEMPLATE_CSV);
-			return json(res, 200, { ok: true, path: TEMPLATE_PATH });
+			return json(res, 200, { ok: true, fileName: basename(TEMPLATE_PATH), directory: "DSH_HOME/imports/commerce-cockpit" });
 		} catch (e) {
 			return json(res, 200, { ok: false, error: String(e && e.message || e) });
 		}
 	}, "cockpit: export-template");
 
-	// model-visible tool: natural-language Q&A against the mock snapshot
+	// Model-visible tool: answers against the active Demo or Imported dataset.
 	ctx.tools.register(defineTool({
 		name: "cockpit_ask",
-		description: "查询「电商经营驾驶舱」今日经营数据并回答老板问题：销售额/毛利/ROI/转化/订单/缺货/渠道对比/趋势/归因。支持自然语言提问，例如「天猫今天为什么下滑」「近7天整体销售额趋势」「哪个渠道ROI最低」「缺货情况」。数据为 2026-08-15 mock 快照（可导入 CSV 覆盖）。",
+		description: "查询「电商经营驾驶舱」当前数据模式并回答可支持的国内电商经营问题。Demo为固定演示快照；Imported只使用指定CSV中的业务日期、平台、店铺、渠道、销售额、订单、访客和推广费，不会回退Demo。",
 		parameters: { question: { type: "string", required: true, description: "自然语言经营问题" } },
 		output: {
 			schema: { type: "object", properties: { answer: { type: "string", required: true, description: "面向老板的回答文本" }, chart: { type: "json", description: "可选的图表数据 {type, title, series} 或 null" } }, additionalProperties: false },
@@ -564,7 +747,8 @@ function apply(ctx) {
 		async execute(args) { return answerQuestion(args.question); },
 	}));
 
-	ctx.logger.info("commerce-cockpit: active (" + config.dataSource + " data source" + (config.dataSource === "csv" ? " from " + config.csvPath : "") + ")");
+	ctx.logger.info("commerce-cockpit: active (" + config.dataSource + " data source" + (config.dataSource === "imported" ? " from " + config.fileName : "") + ")");
 }
 
+export { CSV_HEADERS, importFilePath, parseImportedCsv };
 export default { name: "commerce-cockpit", inject, apply };
