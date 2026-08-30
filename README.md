@@ -74,6 +74,14 @@ business_date,platform,store_id,channel,gmv,orders,visitors,ad_spend
 
 ## 截图
 
+### 真实演示视频
+
+下面的视频展示“经营总览 → 数据要点 → 行动清单”的实际操作流程，时长约 33 秒。
+
+<video controls width="100%" src="screenshots/cockpit-demo-clean-v1.mp4"></video>
+
+如果当前页面不能直接播放，可[下载演示视频](screenshots/cockpit-demo-clean-v1.mp4)。
+
 ![经营总览](screenshots/1-overview.png)
 
 ![数据与要点](screenshots/2-detail.png)
